@@ -6,6 +6,12 @@
   usg_tools.py select IN.xml OUT.xml [RULE..]   -> tailoring file selecting only these
                                                    rules (DEMO_RULES if none given);
                                                    prints how many were selected
+  usg_tools.py pick   RESULTS.xml [RULE..]      -> first of RULE.. then DEMO_RULES that FAILED
+  usg_tools.py tailor IN.xml OUT.xml RULE       -> tailoring file selecting only RULE
+  usg_tools.py harden IN.xml OUT.xml RESULTS.xml [SKIP..]
+                                                -> tailoring file selecting every rule that
+                                                   FAILED in RESULTS.xml, minus SKIP_RULES and
+                                                   the extra SKIP patterns; prints the count
   usg_tools.py fixed  BEFORE.xml AFTER.xml [N]  -> "<count>" then up to N rules that went
                                                    fail -> pass, one per line
 
@@ -14,6 +20,7 @@ profile: a full CIS audit takes minutes and needs more than 512 MiB of RAM
 (oscap gets OOM-killed in the default demo instance). A dozen rules take
 seconds and very little memory, and the score is reported for this set.
 """
+import fnmatch
 import re
 import sys
 import xml.etree.ElementTree as ET
@@ -38,7 +45,6 @@ DEMO_RULES = [
     "banner_etc_issue_net",
     "kernel_module_cramfs_disabled",
     "kernel_module_freevxfs_disabled",
-    "banner_etc_issue_net",
 ]
 
 # Rules the opt-in full hardening (USG_FIX=all) never applies, because they would break
@@ -109,6 +115,29 @@ def select(src: str, dst: str, rules: list) -> int:
     return len(found)
 
 
+def pick(path: str, rules: list) -> str:
+    """First rule (the given ones, then DEMO_RULES) that failed in RESULTS."""
+    results = rule_results(path)
+    for rule in [r for r in rules if r] + DEMO_RULES:
+        if results.get(full_id(rule)) == "fail":
+            return full_id(rule)
+    return ""
+
+
+def tailor(src: str, dst: str, rule: str) -> None:
+    """Write a tailoring file where only `rule` is selected."""
+    if select(src, dst, [rule]) == 0:
+        sys.exit(f"Rule {full_id(rule)} is not part of this profile")
+
+
+def harden(src: str, dst: str, results_path: str, extra_skip: list) -> int:
+    """Select every rule that failed the baseline, except skipped ones."""
+    patterns = SKIP_RULES + [p for p in extra_skip if p]
+    chosen = [r for r, v in rule_results(results_path).items() if v == "fail"
+              and not any(fnmatch.fnmatch(short(r), pat) for pat in patterns)]
+    return select(src, dst, chosen) if chosen else 0
+
+
 def fixed(before: str, after: str, limit: int) -> str:
     b, a = rule_results(before), rule_results(after)
     flipped = sorted(short(r) for r, v in b.items() if v == "fail" and a.get(r) == "pass")
@@ -123,6 +152,12 @@ if __name__ == "__main__":
         print(rule_results(args[0]).get(full_id(args[1]), "unknown"))
     elif cmd == "select":
         print(select(args[0], args[1], args[2:]))
+    elif cmd == "pick":
+        print(pick(args[0], args[1:]))
+    elif cmd == "tailor":
+        tailor(args[0], args[1], args[2])
+    elif cmd == "harden":
+        print(harden(args[0], args[1], args[2], args[3:]))
     elif cmd == "fixed":
         print(fixed(args[0], args[1], int(args[2]) if len(args) > 2 else 10))
     else:

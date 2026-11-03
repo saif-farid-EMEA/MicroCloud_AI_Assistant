@@ -78,12 +78,17 @@ TRACE_COMMANDS=yes
 
 USG_INSTANCE=1           # which instance to harden in step 4
 USG_PROFILE=cis_level1_server
-# one = fix only USG_RULE and re-check just that rule (default: fast, light).
-# all = fix every failing rule in one pass (big score jump, much slower and
-#       heavier: a full remediation plus a second full audit), except a few that
-#       would break the demo (see SKIP_RULES in scripts/usg_tools.py).
+# Step 4 audits and fixes a focused set of CIS rules (~30 s, fits in 512 MiB);
+# the full profile takes minutes and runs out of memory in a small instance.
+# Leave empty for the built-in set (DEMO_RULES in scripts/usg_tools.py), or
+# list your own, space-separated, e.g. USG_RULES="sshd_disable_root_login banner_etc_issue"
+USG_RULES=
+# one =fix only USG_RULE and re-check just that rule (default: fast, light).
+# all = fix every failing rule of the focused set (USG_RULES) in one pass and
+#       re-audit the set, except a few that would break the demo (see
+#       SKIP_RULES in scripts/usg_tools.py).
 USG_FIX=one
 # Extra rules to leave alone with USG_FIX=all (space-separated, * wildcards OK).
 USG_SKIP_RULES=
-# Rule for USG_FIX=one. Leave empty to auto-pick the first failing rule from a safe list.
+# Rule for USG_FIX=one. Leave empty to auto-pick the first failing rule of the focused set.
 USG_RULE=sshd_disable_root_login

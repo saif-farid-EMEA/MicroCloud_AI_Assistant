@@ -202,13 +202,12 @@ Accepting needs a free seat on your Landscape account (shown as *Remaining
 registrations* on the account page).
 
 **Step 4 — USG and CIS.**
-USG audits `MC-Instance_1` against **CIS Level 1 Server**, fixes **one** rule
-(by default *"disable SSH root login"*), and re-checks just that rule, so there
-is no second full audit. The final table shows the **Before** and **After**
-pass rate and the rule going `fail → pass`. To remediate every safely fixable
-rule instead (much slower and heavier), set `USG_FIX=all`. The HTML reports are
-saved in `reports/` (`before-report.html` is the full audit, `after-report.html`
-the re-check); press **o** to open them in the browser.
+USG audits `MC-Instance_1` against a focused set of quick **CIS Level 1
+Server** rules, fixes **one** of them (by default *"disable SSH root login"*),
+and re-checks just that rule. The final table shows the **Before** and
+**After** pass rate and the rule going `fail → pass`. To fix every failing rule
+of the set instead, set `USG_FIX=all`. The HTML reports are saved in `reports/`
+(`before-report.html` is the baseline audit, `after-report.html` the re-check); press **o** to open them in the browser.
 
 ### Web UIs
 

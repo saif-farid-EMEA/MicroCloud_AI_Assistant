@@ -330,13 +330,16 @@ All inside `mc-instance-<USG_INSTANCE>`:
 
 1. `pro attach <PRO_TOKEN>` (already done in step 3, so normally skipped), `pro enable usg`,
    `apt-get install usg`.
-2. **Baseline**: `usg audit cis_level1_server`. Copy the newest results XML
-   and HTML report out to `reports/before-*`. `usg_tools.py score` reads the
-   XML and prints pass rate / passed / failed.
-3. **Choose what to fix**: `usg generate-tailoring` dumps the full profile.
-   With `USG_FIX=one` (default), `usg_tools.py pick` chooses `USG_RULE` if it
-   is failing, otherwise the first failing rule from a list of *safe* ones
-   (rules that won't lock you out, e.g. `sshd_disable_root_login`), and
+2. **Baseline**: `usg generate-tailoring` dumps the full profile and
+   `usg_tools.py select` keeps only a focused set of quick rules (`USG_RULES`,
+   or `DEMO_RULES` in `usg_tools.py`): a full CIS audit takes minutes and gets
+   oscap OOM-killed in a 512 MiB instance. `usg audit --tailoring-file …`
+   audits that set. Copy the newest results XML and HTML report out to
+   `reports/before-*`. `usg_tools.py score` reads the XML and prints pass
+   rate / passed / failed.
+3. **Choose what to fix**: with `USG_FIX=one` (default), `usg_tools.py pick`
+   chooses `USG_RULE` if it is failing, otherwise the first failing rule of
+   the focused set (rules that won't lock you out, e.g. `sshd_disable_root_login`), and
    `usg_tools.py tailor` selects just that rule. With `USG_FIX=all`,
    `usg_tools.py harden` selects every rule that failed the baseline, minus
    `SKIP_RULES` (firewall default-deny, AIDE, AppArmor enforcement, bootloader,
@@ -344,9 +347,9 @@ All inside `mc-instance-<USG_INSTANCE>`:
 4. **Fix**: push the tailoring file back and run
    `usg fix --tailoring-file …`.
 5. **Prove it**: with one rule, `usg audit --tailoring-file …` re-checks only
-   that rule (seconds instead of a second full audit), and
-   `usg_tools.py score before after` lays that result over the baseline for
-   the After numbers. With `USG_FIX=all` the full profile is audited again.
+   that rule, and `usg_tools.py score before after` lays that result over the
+   baseline for the After numbers. With `USG_FIX=all` the focused set is
+   audited again.
    Either way `reports/after-*` is copied out and a Before/After/Change table
    is printed.
 

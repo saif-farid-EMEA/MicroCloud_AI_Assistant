@@ -1,15 +1,18 @@
 #!/usr/bin/env bash
-# STEP 4 — Audit one instance against CIS with USG, fix a rule, check again.
-#   USG_FIX=one  (default) fix only USG_RULE (or the first failing rule from a
-#                safe list), then re-check just that rule: fast and light.
-#   USG_FIX=all  fix every failing rule except the few in usg_tools.py
-#                SKIP_RULES (and USG_SKIP_RULES), then run a second full audit.
+# STEP 4 — Audit one instance against a focused set of CIS rules with USG, fix,
+# check again. A full CIS profile audit takes minutes and gets oscap OOM-killed
+# in a 512 MiB instance, so only USG_RULES (empty = DEMO_RULES in usg_tools.py)
+# are audited.
+#   USG_FIX=one  (default) fix only USG_RULE (or the first failing rule of the
+#                focused set), then re-check just that rule.
+#   USG_FIX=all  fix every failing rule of the focused set except the few in
+#                usg_tools.py SKIP_RULES (and USG_SKIP_RULES), then re-audit the set.
 source "$(dirname "$0")/common.sh"
 require_cluster
 
 inst=$(instance_name "${USG_INSTANCE}")
 tools="${REPO_ROOT}/scripts/usg_tools.py"
-tailoring=tailoring-demo.xml
+focus=tailoring-demo.xml
 mc lxc info "${inst}" >/dev/null 2>&1 || die "${inst} does not exist. Run step 2 first."
 SECONDS=0
 
@@ -42,22 +45,19 @@ in_instance "${inst}" test -s /root/tailoring-full.xml </dev/null ||
     in_instance "${inst}" usg generate-tailoring "${USG_PROFILE}" /root/tailoring-full.xml </dev/null >/dev/null
 in_instance "${inst}" cat /root/tailoring-full.xml </dev/null >"${REPORT_DIR}/tailoring-full.xml"
 read -ra rules <<<"${USG_RULES:-}"
-selected=$(python3 "${tools}" select "${REPORT_DIR}/tailoring-full.xml" "${REPORT_DIR}/${tailoring}" "${rules[@]}")
+selected=$(python3 "${tools}" select "${REPORT_DIR}/tailoring-full.xml" "${REPORT_DIR}/${focus}" "${rules[@]}")
 (( selected > 0 )) || die "None of the chosen rules are in ${USG_PROFILE} — check USG_RULES in demo.conf"
-in_instance "${inst}" sh -c "cat > /root/${tailoring}" <"${REPORT_DIR}/${tailoring}"
+in_instance "${inst}" sh -c "cat > /root/${focus}" <"${REPORT_DIR}/${focus}"
 ok "Focused on ${selected} quick CIS rules from ${USG_PROFILE} (SSH, banners, kernel modules, core dumps, password ageing)"
 
 # --- 2. Baseline --------------------------------------------------------------
 title "2/4  Baseline audit"
-usg_run before usg audit --tailoring-file "/root/${tailoring}"
+usg_run before usg audit --tailoring-file "/root/${focus}"
 read -r score_before pass_before fail_before < <(python3 "${tools}" score "${REPORT_DIR}/before-results.xml")
 echo
 ok "BEFORE:  ${score_before}% of rules pass   (${pass_before} pass, ${fail_before} fail)"
 
 # --- 3. Harden ----------------------------------------------------------------
-in_instance "${inst}" usg generate-tailoring "${USG_PROFILE}" /root/tailoring-full.xml </dev/null >/dev/null
-in_instance "${inst}" cat /root/tailoring-full.xml </dev/null >"${REPORT_DIR}/tailoring-full.xml"
-
 fix_mode="${USG_FIX:-one}"
 if [[ "${fix_mode}" == "one" ]]; then
     rule=$(python3 "${tools}" pick "${REPORT_DIR}/before-results.xml" "${USG_RULE}")
@@ -68,29 +68,27 @@ if [[ "${fix_mode}" == "one" ]]; then
 else
     tailoring=tailoring-harden.xml
     read -ra extra_skip <<<"${USG_SKIP_RULES:-}"
-    selected=$(python3 "${tools}" harden "${REPORT_DIR}/tailoring-full.xml" "${REPORT_DIR}/${tailoring}" \
+    to_fix=$(python3 "${tools}" harden "${REPORT_DIR}/tailoring-full.xml" "${REPORT_DIR}/${tailoring}" \
         "${REPORT_DIR}/before-results.xml" "${extra_skip[@]}")
-    (( selected > 0 )) || die "No failing rules left to fix — this instance is already hardened (try another USG_INSTANCE)"
-    title "3/4  Hardening: fixing ${selected} failing CIS rules in one pass  (takes a few minutes)"
+    (( to_fix > 0 )) || die "No failing rules left to fix — this instance is already hardened (try another USG_INSTANCE)"
+    title "3/4  Hardening: fixing ${to_fix} failing CIS rules in one pass"
     echo -e "  ${DIM}Skipped on purpose: firewall default-deny, AIDE, AppArmor enforcement, bootloader,"
     echo -e "  mount options and package removals (see SKIP_RULES in scripts/usg_tools.py).${NC}"
 fi
 in_instance "${inst}" sh -c "cat > /root/${tailoring}" <"${REPORT_DIR}/${tailoring}"
-show_in "${inst}" env DEBIAN_FRONTEND=noninteractive usg fix --tailoring-file "/root/${tailoring}" </dev/null || true
+usg_run "" env DEBIAN_FRONTEND=noninteractive usg fix --tailoring-file "/root/${tailoring}"
 
 # --- 4. Prove it --------------------------------------------------------------
 if [[ "${fix_mode}" == "one" ]]; then
     # Only one rule changed, so re-check only that rule (seconds, not minutes) and
     # combine it with the baseline for the After numbers.
     title "4/4  Re-audit: ${rule#xccdf_org.ssgproject.content_rule_}"
-    show_in "${inst}" usg audit --tailoring-file "/root/${tailoring}" </dev/null || true
-    fetch_latest after
+    usg_run after usg audit --tailoring-file "/root/${tailoring}"
     read -r score_after pass_after fail_after < <(python3 "${tools}" score \
         "${REPORT_DIR}/before-results.xml" "${REPORT_DIR}/after-results.xml")
 else
-    title "4/4  Re-audit: ${USG_PROFILE}"
-    show_in "${inst}" usg audit "${USG_PROFILE}" </dev/null || true
-    fetch_latest after
+    title "4/4  Re-audit: the ${selected} focused CIS rules"
+    usg_run after usg audit --tailoring-file "/root/${focus}"
     read -r score_after pass_after fail_after < <(python3 "${tools}" score "${REPORT_DIR}/after-results.xml")
 fi
 

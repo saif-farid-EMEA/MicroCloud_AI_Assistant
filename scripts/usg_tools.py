@@ -1,6 +1,7 @@
 """Small helpers that read and write USG (OpenSCAP) files for step 4.
 
-  usg_tools.py score  RESULTS.xml               -> "<score> <passed> <failed>"
+  usg_tools.py score  RESULTS.xml [PARTIAL.xml] -> "<pass%> <passed> <failed>"; PARTIAL (a
+                                                   re-audit of a few rules) overrides those rules
   usg_tools.py result RESULTS.xml RULE          -> pass / fail / notapplicable / ...
   usg_tools.py select IN.xml OUT.xml [RULE..]   -> tailoring file selecting only these
                                                    rules (DEMO_RULES if none given);
@@ -37,13 +38,19 @@ DEMO_RULES = [
     "banner_etc_issue_net",
     "kernel_module_cramfs_disabled",
     "kernel_module_freevxfs_disabled",
-    "kernel_module_hfs_disabled",
-    "kernel_module_hfsplus_disabled",
-    "kernel_module_jffs2_disabled",
-    "coredump_disable_storage",
-    "coredump_disable_backtraces",
-    "accounts_maximum_age_login_defs",
-    "accounts_password_warn_age_login_defs",
+    "banner_etc_issue_net",
+]
+
+# Rules the opt-in full hardening (USG_FIX=all) never applies, because they would break
+# the demo instance or take far too long on stage. Shell-style patterns on the
+# short rule name. Everything else that fails the baseline gets fixed.
+SKIP_RULES = [
+    "aide_*", "package_aide_installed",  # AIDE builds a file database: 10+ minutes
+    "*ufw*", "*nftables*", "*iptables*", "*firewall*",  # default-deny would cut Landscape off
+    "apparmor_*", "all_apparmor_profiles_*",  # enforcing profiles inside a container
+    "grub2_*", "*bootloader*",            # no bootloader in a container
+    "partition_for_*", "mount_option_*",  # mounts belong to the host/LXD
+    "package_*_removed",                  # don't uninstall packages under the demo
 ]
 
 
@@ -69,14 +76,17 @@ def rule_results(path: str) -> dict:
     return results
 
 
-def score(path: str) -> str:
-    value = "?"
-    for el in ET.parse(path).iter():
-        if local(el.tag) == "score":
-            value = f"{float(el.text):.1f}"
-            break
-    results = list(rule_results(path).values())
-    return f"{value} {results.count('pass')} {results.count('fail')}"
+def score(path: str, partial: str = "") -> str:
+    """Share of checked rules that pass. With PARTIAL, its results replace the
+    full audit's for those rules, so one fixed rule needs no second full audit."""
+    merged = rule_results(path)
+    if partial:
+        merged.update({r: v for r, v in rule_results(partial).items()
+                       if v in ("pass", "fail")})
+    results = list(merged.values())
+    passed, failed = results.count("pass"), results.count("fail")
+    value = f"{100 * passed / (passed + failed):.1f}" if passed + failed else "?"
+    return f"{value} {passed} {failed}"
 
 
 def select(src: str, dst: str, rules: list) -> int:
@@ -108,7 +118,7 @@ def fixed(before: str, after: str, limit: int) -> str:
 if __name__ == "__main__":
     cmd, args = sys.argv[1], sys.argv[2:]
     if cmd == "score":
-        print(score(args[0]))
+        print(score(args[0], args[1] if len(args) > 1 else ""))
     elif cmd == "result":
         print(rule_results(args[0]).get(full_id(args[1]), "unknown"))
     elif cmd == "select":

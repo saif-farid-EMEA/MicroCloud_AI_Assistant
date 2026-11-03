@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
-# STEP 4 — Audit one instance against a focused set of CIS rules with USG, fix
-# every failing one in a single pass, audit again. Built to finish in about
-# 30 seconds and fit in a 512 MiB instance: a full CIS profile audit takes
-# minutes and gets oscap OOM-killed at that size. USG itself is installed in
-# step 3, so nothing is downloaded here.
-#   USG_RULES  space-separated rules to use (empty = DEMO_RULES in usg_tools.py)
+# STEP 4 — Audit one instance against CIS with USG, fix a rule, check again.
+#   USG_FIX=one  (default) fix only USG_RULE (or the first failing rule from a
+#                safe list), then re-check just that rule: fast and light.
+#   USG_FIX=all  fix every failing rule except the few in usg_tools.py
+#                SKIP_RULES (and USG_SKIP_RULES), then run a second full audit.
 source "$(dirname "$0")/common.sh"
 require_cluster
 
@@ -53,29 +52,68 @@ title "2/4  Baseline audit"
 usg_run before usg audit --tailoring-file "/root/${tailoring}"
 read -r score_before pass_before fail_before < <(python3 "${tools}" score "${REPORT_DIR}/before-results.xml")
 echo
-ok "BEFORE:  score ${score_before}%   (${pass_before} rules pass, ${fail_before} fail)"
-(( fail_before > 0 )) || die "Nothing fails — this instance is already hardened (try another USG_INSTANCE)"
+ok "BEFORE:  ${score_before}% of rules pass   (${pass_before} pass, ${fail_before} fail)"
 
-# --- 3. Fix -------------------------------------------------------------------
-title "3/4  Fixing all ${fail_before} failing rules in one command"
-usg_run "" env DEBIAN_FRONTEND=noninteractive usg fix --tailoring-file "/root/${tailoring}"
+# --- 3. Harden ----------------------------------------------------------------
+in_instance "${inst}" usg generate-tailoring "${USG_PROFILE}" /root/tailoring-full.xml </dev/null >/dev/null
+in_instance "${inst}" cat /root/tailoring-full.xml </dev/null >"${REPORT_DIR}/tailoring-full.xml"
+
+fix_mode="${USG_FIX:-one}"
+if [[ "${fix_mode}" == "one" ]]; then
+    rule=$(python3 "${tools}" pick "${REPORT_DIR}/before-results.xml" "${USG_RULE}")
+    [[ -n "${rule}" ]] || die "None of the preferred rules are failing — set USG_RULE in demo.conf to a failing rule (see reports/before-report.html)"
+    tailoring=tailoring-one-rule.xml
+    python3 "${tools}" tailor "${REPORT_DIR}/tailoring-full.xml" "${REPORT_DIR}/${tailoring}" "${rule}"
+    title "3/4  Applying ONE CIS rule: ${rule#xccdf_org.ssgproject.content_rule_}"
+else
+    tailoring=tailoring-harden.xml
+    read -ra extra_skip <<<"${USG_SKIP_RULES:-}"
+    selected=$(python3 "${tools}" harden "${REPORT_DIR}/tailoring-full.xml" "${REPORT_DIR}/${tailoring}" \
+        "${REPORT_DIR}/before-results.xml" "${extra_skip[@]}")
+    (( selected > 0 )) || die "No failing rules left to fix — this instance is already hardened (try another USG_INSTANCE)"
+    title "3/4  Hardening: fixing ${selected} failing CIS rules in one pass  (takes a few minutes)"
+    echo -e "  ${DIM}Skipped on purpose: firewall default-deny, AIDE, AppArmor enforcement, bootloader,"
+    echo -e "  mount options and package removals (see SKIP_RULES in scripts/usg_tools.py).${NC}"
+fi
+in_instance "${inst}" sh -c "cat > /root/${tailoring}" <"${REPORT_DIR}/${tailoring}"
+show_in "${inst}" env DEBIAN_FRONTEND=noninteractive usg fix --tailoring-file "/root/${tailoring}" </dev/null || true
 
 # --- 4. Prove it --------------------------------------------------------------
-title "4/4  Re-audit"
-usg_run after usg audit --tailoring-file "/root/${tailoring}"
-read -r score_after pass_after fail_after < <(python3 "${tools}" score "${REPORT_DIR}/after-results.xml")
+if [[ "${fix_mode}" == "one" ]]; then
+    # Only one rule changed, so re-check only that rule (seconds, not minutes) and
+    # combine it with the baseline for the After numbers.
+    title "4/4  Re-audit: ${rule#xccdf_org.ssgproject.content_rule_}"
+    show_in "${inst}" usg audit --tailoring-file "/root/${tailoring}" </dev/null || true
+    fetch_latest after
+    read -r score_after pass_after fail_after < <(python3 "${tools}" score \
+        "${REPORT_DIR}/before-results.xml" "${REPORT_DIR}/after-results.xml")
+else
+    title "4/4  Re-audit: ${USG_PROFILE}"
+    show_in "${inst}" usg audit "${USG_PROFILE}" </dev/null || true
+    fetch_latest after
+    read -r score_after pass_after fail_after < <(python3 "${tools}" score "${REPORT_DIR}/after-results.xml")
+fi
 
 echo
-title "Result for ${inst} (MC-Instance_${USG_INSTANCE}) — ${selected} CIS rules, ${SECONDS}s"
-printf '  %-10s %-8s %-8s %s\n' "" "Score" "Pass" "Fail"
+title "Result for ${inst} (MC-Instance_${USG_INSTANCE})"
+printf '  %-10s %-8s %-8s %s\n' "" "Pass %" "Pass" "Fail"
 printf '  %-10s %-8s %-8s %s\n' "Before" "${score_before}%" "${pass_before}" "${fail_before}"
 printf '  %-10s %-8s %-8s %s\n' "After" "${score_after}%" "${pass_after}" "${fail_after}"
 printf '  %-10s %-8s %-8s %s\n' "Change" "$(awk -v a="${score_after}" -v b="${score_before}" 'BEGIN{printf "%+.1f", a-b}')" \
     "$(( pass_after - pass_before ))" "$(( fail_after - fail_before ))"
-mapfile -t flipped < <(python3 "${tools}" fixed "${REPORT_DIR}/before-results.xml" "${REPORT_DIR}/after-results.xml" 30)
-printf '\n  %s rules went fail → pass:\n' "${flipped[0]}"
-for r in "${flipped[@]:1}"; do printf '    ✔ %s\n' "${r}"; done
-echo
-ok "HTML reports saved: reports/before-report.html and reports/after-report.html"
+if [[ "${fix_mode}" == "one" ]]; then
+    printf '\n  Rule %s:  %s  →  %s\n\n' "${rule#xccdf_org.ssgproject.content_rule_}" \
+        "$(python3 "${tools}" result "${REPORT_DIR}/before-results.xml" "${rule}")" \
+        "$(python3 "${tools}" result "${REPORT_DIR}/after-results.xml" "${rule}")"
+    ok "HTML reports saved: reports/before-report.html (full audit) and reports/after-report.html (that rule)"
+else
+    mapfile -t flipped < <(python3 "${tools}" fixed "${REPORT_DIR}/before-results.xml" "${REPORT_DIR}/after-results.xml" 12)
+    printf '\n  %s rules went fail → pass' "${flipped[0]}"
+    (( ${#flipped[@]} > 1 )) && printf ', including:\n' || printf '\n'
+    for r in "${flipped[@]:1}"; do printf '    ✔ %s\n' "${r}"; done
+    (( flipped[0] > ${#flipped[@]} - 1 )) && printf '    … and %s more (see reports/after-report.html)\n' "$(( flipped[0] - ${#flipped[@]} + 1 ))"
+    echo
+    ok "HTML reports saved: reports/before-report.html and reports/after-report.html"
+fi
 bash "${REPO_ROOT}/scripts/ui_links.sh" usg
 bash "${REPO_ROOT}/scripts/ui_links.sh" landscape
